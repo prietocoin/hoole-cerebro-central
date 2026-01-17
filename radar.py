@@ -52,12 +52,18 @@ class RadarV2:
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency} en {url}...")
-                await page.goto(url, wait_until="networkidle", timeout=60000)
+                print(f"[*] Escaneando {currency}...")
+                # Usamos domcontentloaded + espera manual para evitar bloqueos de red infinitos
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 
-                # Intentamos esperar a que cargue cualquier div que contenga un precio
-                # En Binance P2P, los precios suelen estar en elementos con clases que contienen 'price' o 'bn-flex'
-                await asyncio.sleep(5) 
+                # Esperamos a que aparezca al menos un elemento que parezca un precio.
+                # Binance suele usar clases como 'bn-flex' o divs con texto de moneda.
+                try:
+                    await page.wait_for_selector('div:has-text(".")', timeout=10000)
+                except:
+                    pass # Seguimos si el selector falla pero la página cargó
+                
+                await asyncio.sleep(4) # Tiempo para que el JS renderice los números
                 
                 # Obtenemos el contenido
                 content = await page.content()
