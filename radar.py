@@ -32,9 +32,11 @@ class RadarV2:
     async def get_fiat_prices(self, currency, url):
         """Extrae los precios de Binance P2P usando Playwright (Stealth mode)"""
         async with async_playwright() as p:
-            # Lanzamos el navegador con configuración humana
-            # Intentamos headless=False si sigue fallando para ver qué pasa
-            browser = await p.chromium.launch(headless=True) 
+            # Lanzamos el navegador con configuración compatible para Docker
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            ) 
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
                 viewport={'width': 1280, 'height': 800},
@@ -152,7 +154,10 @@ class RadarV2:
         """Obtiene la tasa BCV desde tcambio.app"""
         url = "https://www.tcambio.app/"
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            )
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             try:
