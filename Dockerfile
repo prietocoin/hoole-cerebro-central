@@ -1,5 +1,5 @@
-# Usamos la imagen oficial de Playwright que ya trae los navegadores instalados
-FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+# Usamos la imagen oficial de Playwright que coincida con la librería instalada
+FROM mcr.microsoft.com/playwright/python:v1.57.0-jammy
 
 # Directorio de trabajo
 WORKDIR /app
