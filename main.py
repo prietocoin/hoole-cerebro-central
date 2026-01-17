@@ -10,49 +10,68 @@ except Exception as e:
 
 app = FastAPI(title="Hoole Cerebro Central API")
 
+import time
+
+# Memoria de caché global
+CACHE = {
+    "data": None,
+    "timestamp": 0
+}
+CACHE_TTL = 300 # 5 minutos
+
 @app.get("/")
 def read_root():
     return {"status": "online", "message": "Hoole Cerebro Central arriba"}
 
 @app.get("/test")
 def test_connection():
-    """Endpoint instantáneo para probar si n8n llega al servidor"""
     return {"status": "ok", "message": "Conexión exitosa desde n8n"}
+
+async def process_fiat(fiat, url):
+    """Procesador individual para cada moneda para ejecución en paralelo"""
+    try:
+        prices = await radar.get_fiat_prices(fiat, url)
+        avg = radar.calculate_purified_average(prices)
+        adjustment = 0.99 if fiat in ["COP", "VES"] else 1.0
+        return fiat, avg * adjustment
+    except Exception as e:
+        print(f"[!] Error procesando {fiat}: {e}")
+        return fiat, 0.0
 
 @app.get("/radar")
 async def get_market_rates():
-    """
-    Endpoint para obtener las tasas de mercado actualizadas.
-    Llamado por n8n o el Dashboard.
-    """
+    # 1. Verificar Caché
+    now = time.time()
+    if CACHE["data"] and (now - CACHE["timestamp"] < CACHE_TTL):
+        print("[*] Sirviendo desde Caché (TTL: {}s)".format(int(CACHE_TTL - (now - CACHE["timestamp"]))))
+        return {
+            "success": True, 
+            "cached": True, 
+            "expires_in": int(CACHE_TTL - (now - CACHE["timestamp"])),
+            **CACHE["data"]
+        }
+
     try:
         from radar import BINANCE_URLS
-        print(f"[*] Solicitud recibida en /radar. Iniciando escaneo...")
+        print(f"[*] Solicitud recibida en /radar. Iniciando escaneo PARALELO...")
         
-        final_rates = {}
-        all_currencies = list(BINANCE_URLS.keys())
+        # 2. Ejecutar escaneos en PARALELO
+        tasks = []
+        for fiat, url in BINANCE_URLS.items():
+            tasks.append(process_fiat(fiat, url))
         
-        # Ejecutamos el radar
-        for fiat in all_currencies:
-            try:
-                prices = await radar.get_fiat_prices(fiat, BINANCE_URLS[fiat])
-                avg = radar.calculate_purified_average(prices)
-                
-                # Ajuste del -1% solo para COP y VES
-                adjustment = 0.99 if fiat in ["COP", "VES"] else 1.0
-                final_rates[fiat] = avg * adjustment
-                # Delay mínimo en entorno servidor
-                await asyncio.sleep(0.3) 
-            except Exception as e_inner:
-                print(f"[!] Error procesando {fiat}: {e_inner}")
-                final_rates[fiat] = 0.0
-
-        # BRL y BCV
-        try:
-            final_rates["BRL"] = await radar.get_brl_price()
-            final_rates["BCV"] = await radar.get_bcv_price()
-        except Exception as e_extra:
-            print(f"[!] Error extras: {e_extra}")
+        # Agregamos BRL y BCV a la lista de tareas paralelo
+        # (Aunque BRL es API, lo metemos al saco para ahorrar tiempo)
+        async def wrap_brl(): return "BRL", await radar.get_brl_price()
+        async def wrap_bcv(): return "BCV", await radar.get_bcv_price()
+        
+        tasks.append(wrap_brl())
+        tasks.append(wrap_bcv())
+        
+        # Lanzamos todo a la vez
+        results = await asyncio.gather(*tasks)
+        
+        final_rates = dict(results)
         
         # Formateo final
         formatted_rates = {}
@@ -61,14 +80,23 @@ async def get_market_rates():
                 formatted_rates[fiat] = int(round(val, 0))
             else:
                 formatted_rates[fiat] = round(val, 2)
-            
-        return {
-            "success": True,
+        
+        response_data = {
             "rates": formatted_rates,
             "raw_data": final_rates
         }
+
+        # 3. Guardar en Caché
+        CACHE["data"] = response_data
+        CACHE["timestamp"] = now
+            
+        return {
+            "success": True,
+            "cached": False,
+            **response_data
+        }
     except Exception as e:
-        print(f"[CRÍTICO] Fallo general en /radar: {str(e)}")
+        print(f"[CRÍTICO] Fallo en /radar: {str(e)}")
         return {
             "success": False,
             "error_type": type(e).__name__,
