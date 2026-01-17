@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 import asyncio
+import time
+import random
 
 try:
     from radar import RadarV2
@@ -9,8 +11,6 @@ except Exception as e:
     radar = None
 
 app = FastAPI(title="Hoole Cerebro Central API")
-
-import time
 
 # Memoria de caché global
 CACHE = {
@@ -28,15 +28,19 @@ async def startup_event():
     asyncio.create_task(background_radar_worker())
 
 async def background_radar_worker():
-    """Trabajador que actualiza las tasas cada 10 minutos perpetuamente"""
+    """Trabajador que actualiza las tasas cada 10 minutos proactivamente"""
+    if not radar:
+        print("[!] Radar no inicializado. El worker no arrancará.")
+        return
+
     from radar import BINANCE_URLS
     
     while True:
         try:
-            print(f"[*] [Worker] Iniciando actualización proactiva de tasas...")
+            print(f"[*] [Worker] Iniciando actualización de tasas...")
             start_time = time.time()
             
-            # Procesamos de 2 en 2 para no saturar la RAM del VPS (Semaphore)
+            # Semáforo para no saturar el VPS (procesar de 2 en 2)
             sem = asyncio.Semaphore(2)
             
             async def safe_process(fiat, url):
@@ -51,61 +55,77 @@ async def background_radar_worker():
                         print(f"   [Worker] ❌ Error en {fiat}: {e}")
                         return fiat, 0.0
 
+            # Crear tareas para Binance P2P
             tasks = [safe_process(f, u) for f, u in BINANCE_URLS.items()]
             
-            # Agregamos BRL y BCV (rápido)
-            async def get_extras():
+            # Ejecutar P2P en paralelo (respetando el semáforo)
+            results = await asyncio.gather(*tasks)
+            
+            # Obtener BRL y BCV por separado
+            try:
                 brl = await radar.get_brl_price()
                 bcv = await radar.get_bcv_price()
-                return [("BRL", brl), ("BCV", bcv)]
+            except Exception as e_extra:
+                print(f"[!] Error en extras (BRL/BCV): {e_extra}")
+                brl, bcv = 0.0, 0.0
 
-            results = await asyncio.gather(*tasks)
-            extras = await get_extras()
+            final_rates_raw = dict(results)
+            final_rates_raw["BRL"] = brl
+            final_rates_raw["BCV"] = bcv
             
-            final_rates = dict(results + extras)
-            
-            # Aplicamos ajustes y formateo
+            # Aplicar ajustes y formateo
             formatted_rates = {}
-            for fiat, val in final_rates.items():
-                # Ajuste -1% COP y VES
-                adj = 0.99 if fiat in ["COP", "VES"] else 1.0
-                val_adj = val * adj
+            final_rates_adjusted = {}
+            
+            for fiat, val in final_rates_raw.items():
+                # Ajuste -1% solo para COP y VES (Binance P2P)
+                # BCV y BRL tienen 0% ajuste (val * 1.0)
+                adjustment = 0.99 if fiat in ["COP", "VES"] else 1.0
+                val_adj = val * adjustment
                 
+                # Guardar valor ajustado para el cliente
+                final_rates_adjusted[fiat] = val_adj
+                
+                # Formateo visual
                 if val_adj >= 500:
                     formatted_rates[fiat] = int(round(val_adj, 0))
                 else:
                     formatted_rates[fiat] = round(val_adj, 2)
-                
-                final_rates[fiat] = val_adj # Guardamos el ajustado en raw también
 
-            # Actualizamos CACHE
+            # Actualizar Caché Global
             CACHE["data"] = {
                 "rates": formatted_rates,
-                "raw_data": final_rates
+                "raw_data": final_rates_adjusted
             }
             CACHE["timestamp"] = time.time()
             CACHE["status"] = "ready"
             
             duration = int(time.time() - start_time)
-            print(f"[+] [Worker] Tasas actualizadas con éxito en {duration}s. Próxima actualización en 10min.")
+            print(f"[+] [Worker] Éxito. Tasas listas en {duration}s. Siguiente ciclo en 10m.")
             
         except Exception as e:
-            print(f"[CRÍTICO] Error en worker: {e}")
+            print(f"[CRÍTICO] Error general en Worker: {e}")
             CACHE["status"] = "error"
         
-        # Esperamos 10 minutos antes de la siguiente vuelta
+        # Esperar 10 minutos (600s)
         await asyncio.sleep(600)
+
+@app.get("/")
+def read_root():
+    return {"status": "online", "message": "Hoole Cerebro Central arriba"}
+
+@app.get("/test")
+def test_connection():
+    return {"status": "ok", "message": "Conexión exitosa"}
 
 @app.get("/radar")
 async def get_market_rates():
-    """
-    Endpoint instantáneo: responde con lo que haya en la CACHE.
-    """
+    """Retorna las tasas almacenadas en caché instantáneamente"""
     if CACHE["status"] == "initializing" and not CACHE["data"]["rates"]:
         return {
             "success": False,
             "status": "initializing",
-            "message": "El Cerebro se está despertando. Por favor, espera 30 segundos y recarga."
+            "message": "El Cerebro se está despertando. Reintenta en 30 segundos."
         }
     
     now = time.time()
@@ -116,3 +136,5 @@ async def get_market_rates():
         "status": CACHE["status"],
         "age_seconds": age,
         "updated_at": time.ctime(CACHE["timestamp"]),
+        **CACHE["data"]
+    }
