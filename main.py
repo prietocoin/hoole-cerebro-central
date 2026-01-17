@@ -14,91 +14,105 @@ import time
 
 # Memoria de caché global
 CACHE = {
-    "data": None,
-    "timestamp": 0
+    "data": {
+        "rates": {},
+        "raw_data": {}
+    },
+    "timestamp": 0,
+    "status": "initializing"
 }
-CACHE_TTL = 300 # 5 minutos
 
-@app.get("/")
-def read_root():
-    return {"status": "online", "message": "Hoole Cerebro Central arriba"}
+@app.on_event("startup")
+async def startup_event():
+    """Al arrancar el servidor, lanzamos el trabajador de fondo"""
+    asyncio.create_task(background_radar_worker())
 
-@app.get("/test")
-def test_connection():
-    return {"status": "ok", "message": "Conexión exitosa desde n8n"}
+async def background_radar_worker():
+    """Trabajador que actualiza las tasas cada 10 minutos perpetuamente"""
+    from radar import BINANCE_URLS
+    
+    while True:
+        try:
+            print(f"[*] [Worker] Iniciando actualización proactiva de tasas...")
+            start_time = time.time()
+            
+            # Procesamos de 2 en 2 para no saturar la RAM del VPS (Semaphore)
+            sem = asyncio.Semaphore(2)
+            
+            async def safe_process(fiat, url):
+                async with sem:
+                    try:
+                        prices = await radar.get_fiat_prices(fiat, url)
+                        avg = radar.calculate_purified_average(prices)
+                        return fiat, avg
+                    except Exception as e:
+                        print(f"[!] Error worker en {fiat}: {e}")
+                        return fiat, 0.0
 
-async def process_fiat(fiat, url):
-    """Procesador individual para cada moneda para ejecución en paralelo"""
-    try:
-        prices = await radar.get_fiat_prices(fiat, url)
-        avg = radar.calculate_purified_average(prices)
-        adjustment = 0.99 if fiat in ["COP", "VES"] else 1.0
-        return fiat, avg * adjustment
-    except Exception as e:
-        print(f"[!] Error procesando {fiat}: {e}")
-        return fiat, 0.0
+            tasks = [safe_process(f, u) for f, u in BINANCE_URLS.items()]
+            
+            # Agregamos BRL y BCV (rápido)
+            async def get_extras():
+                brl = await radar.get_brl_price()
+                bcv = await radar.get_bcv_price()
+                return [("BRL", brl), ("BCV", bcv)]
+
+            results = await asyncio.gather(*tasks)
+            extras = await get_extras()
+            
+            final_rates = dict(results + extras)
+            
+            # Aplicamos ajustes y formateo
+            formatted_rates = {}
+            for fiat, val in final_rates.items():
+                # Ajuste -1% COP y VES
+                adj = 0.99 if fiat in ["COP", "VES"] else 1.0
+                val_adj = val * adj
+                
+                if val_adj >= 500:
+                    formatted_rates[fiat] = int(round(val_adj, 0))
+                else:
+                    formatted_rates[fiat] = round(val_adj, 2)
+                
+                final_rates[fiat] = val_adj # Guardamos el ajustado en raw también
+
+            # Actualizamos CACHE
+            CACHE["data"] = {
+                "rates": formatted_rates,
+                "raw_data": final_rates
+            }
+            CACHE["timestamp"] = time.time()
+            CACHE["status"] = "ready"
+            
+            duration = int(time.time() - start_time)
+            print(f"[+] [Worker] Tasas actualizadas con éxito en {duration}s. Próxima actualización en 10min.")
+            
+        except Exception as e:
+            print(f"[CRÍTICO] Error en worker: {e}")
+            CACHE["status"] = "error"
+        
+        # Esperamos 10 minutos antes de la siguiente vuelta
+        await asyncio.sleep(600)
 
 @app.get("/radar")
 async def get_market_rates():
-    # 1. Verificar Caché
-    now = time.time()
-    if CACHE["data"] and (now - CACHE["timestamp"] < CACHE_TTL):
-        print("[*] Sirviendo desde Caché (TTL: {}s)".format(int(CACHE_TTL - (now - CACHE["timestamp"]))))
-        return {
-            "success": True, 
-            "cached": True, 
-            "expires_in": int(CACHE_TTL - (now - CACHE["timestamp"])),
-            **CACHE["data"]
-        }
-
-    try:
-        from radar import BINANCE_URLS
-        print(f"[*] Solicitud recibida en /radar. Iniciando escaneo PARALELO...")
-        
-        # 2. Ejecutar escaneos en PARALELO
-        tasks = []
-        for fiat, url in BINANCE_URLS.items():
-            tasks.append(process_fiat(fiat, url))
-        
-        # Agregamos BRL y BCV a la lista de tareas paralelo
-        # (Aunque BRL es API, lo metemos al saco para ahorrar tiempo)
-        async def wrap_brl(): return "BRL", await radar.get_brl_price()
-        async def wrap_bcv(): return "BCV", await radar.get_bcv_price()
-        
-        tasks.append(wrap_brl())
-        tasks.append(wrap_bcv())
-        
-        # Lanzamos todo a la vez
-        results = await asyncio.gather(*tasks)
-        
-        final_rates = dict(results)
-        
-        # Formateo final
-        formatted_rates = {}
-        for fiat, val in final_rates.items():
-            if val >= 500:
-                formatted_rates[fiat] = int(round(val, 0))
-            else:
-                formatted_rates[fiat] = round(val, 2)
-        
-        response_data = {
-            "rates": formatted_rates,
-            "raw_data": final_rates
-        }
-
-        # 3. Guardar en Caché
-        CACHE["data"] = response_data
-        CACHE["timestamp"] = now
-            
-        return {
-            "success": True,
-            "cached": False,
-            **response_data
-        }
-    except Exception as e:
-        print(f"[CRÍTICO] Fallo en /radar: {str(e)}")
+    """
+    Endpoint instantáneo: responde con lo que haya en la CACHE.
+    """
+    if CACHE["status"] == "initializing" and not CACHE["data"]["rates"]:
         return {
             "success": False,
-            "error_type": type(e).__name__,
-            "message": str(e)
+            "status": "initializing",
+            "message": "El Cerebro se está despertando. Por favor, espera 30 segundos y recarga."
         }
+    
+    now = time.time()
+    age = int(now - CACHE["timestamp"])
+    
+    return {
+        "success": True,
+        "status": CACHE["status"],
+        "age_seconds": age,
+        "updated_at": time.ctime(CACHE["timestamp"]),
+        **CACHE["data"]
+    }
