@@ -42,11 +42,13 @@ async def background_radar_worker():
             async def safe_process(fiat, url):
                 async with sem:
                     try:
+                        print(f"   [Worker] Procesando {fiat}...")
                         prices = await radar.get_fiat_prices(fiat, url)
                         avg = radar.calculate_purified_average(prices)
+                        print(f"   [Worker] ✅ {fiat} listo: {round(avg, 2)}")
                         return fiat, avg
                     except Exception as e:
-                        print(f"[!] Error worker en {fiat}: {e}")
+                        print(f"   [Worker] ❌ Error en {fiat}: {e}")
                         return fiat, 0.0
 
             tasks = [safe_process(f, u) for f, u in BINANCE_URLS.items()]
@@ -114,5 +116,3 @@ async def get_market_rates():
         "status": CACHE["status"],
         "age_seconds": age,
         "updated_at": time.ctime(CACHE["timestamp"]),
-        **CACHE["data"]
-    }
