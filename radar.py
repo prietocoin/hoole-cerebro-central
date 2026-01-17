@@ -35,24 +35,29 @@ class RadarV2:
             # Lanzamos el navegador con configuración compatible para Docker
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox", 
+                    "--disable-setuid-sandbox", 
+                    "--disable-dev-shm-usage",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-gpu"
+                ]
             ) 
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
-                viewport={'width': 1280, 'height': 800},
-                locale="es-ES"
+                viewport={'width': 1920, 'height': 1080},
+                extra_http_headers={"Accept-Language": "es-ES,es;q=0.9"}
             )
             
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency}...")
-                # Reducimos wait_until a 'domcontentloaded' para ser más rápidos
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                print(f"[*] Escaneando {currency} en {url}...")
+                await page.goto(url, wait_until="networkidle", timeout=60000)
                 
-                # Esperamos a que los elementos de precio sean visibles 
-                # Binance usa divs con clases dinámicas, pero el texto del precio suele estar en c-primary
-                await asyncio.sleep(8) # Espera generosa para carga de JS
+                # Intentamos esperar a que cargue cualquier div que contenga un precio
+                # En Binance P2P, los precios suelen estar en elementos con clases que contienen 'price' o 'bn-flex'
+                await asyncio.sleep(5) 
                 
                 # Obtenemos el contenido
                 content = await page.content()
@@ -141,13 +146,21 @@ class RadarV2:
     async def get_brl_price(self):
         """Obtiene el precio de USDTBRL directamente de la API de Binance"""
         url = "https://api.binance.com/api/v3/ticker/price?symbol=USDTBRL"
-        async with aiohttp.ClientSession() as session:
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        async with aiohttp.ClientSession(headers=headers) as session:
             try:
-                async with session.get(url) as response:
-                    data = await response.json()
-                    return float(data['price'])
+                print(f"[*] Solicitando BRL a Binance API...")
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        val = float(data['price'])
+                        print(f"[+] BRL obtenido: {val}")
+                        return val
+                    else:
+                        print(f"[!] API BRL error: Status {response.status}")
+                        return 0.0
             except Exception as e:
-                print(f"[!] Error obteniendo BRL: {e}")
+                print(f"[!] Error de red en BRL: {e}")
                 return 0.0
 
     async def get_bcv_price(self):
@@ -162,8 +175,8 @@ class RadarV2:
             page = await context.new_page()
             try:
                 print("[*] Escaneando BCV...")
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(5)
+                await page.goto(url, wait_until="networkidle", timeout=60000)
+                await asyncio.sleep(8)
                 
                 content = await page.content()
                 soup = BeautifulSoup(content, 'html.parser')
