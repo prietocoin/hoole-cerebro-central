@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from radar_v2 import RadarV2
+from radar import RadarV2
 import asyncio
 
 app = FastAPI(title="Hoole Cerebro Central API")
@@ -15,7 +15,7 @@ async def get_market_rates():
     Endpoint para obtener las tasas de mercado actualizadas.
     Llamado por n8n o el Dashboard.
     """
-    from radar_v2 import BINANCE_URLS
+    from radar import BINANCE_URLS
     
     final_rates = {}
     all_currencies = list(BINANCE_URLS.keys())
