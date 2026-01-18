@@ -27,67 +27,60 @@ USER_AGENTS = [
 
 class RadarV2:
     async def get_fiat_prices(self, currency, url):
-        """Extrae precios de Binance P2P usando Motor v3 (Evaluate & Anti-Risk)"""
+        """Extrae precios de Binance P2P usando Motor v3.2 (Extracción Quirúrgica)"""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency} (Motor v3)...")
+                print(f"[*] Escaneando {currency} (Motor v3.2)...")
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                await asyncio.sleep(6) # Espera inicial para renderizado
-
-                # --- LIMPIEZA DE AVISOS (Motor v3.1 - Corregido) ---
-                # Usamos el sistema nativo de Playwright para evitar el error de sintaxis anterior
-                warning_selectors = [
-                    'button:has-text("Confirm")', 
-                    'button:has-text("Confirmar")',
-                    'button:has-text("I have read")',
-                    'label:has-text("I have read")'
-                ]
-                for selector in warning_selectors:
-                    try:
-                        locator = page.locator(selector)
-                        if await locator.is_visible(timeout=3000):
-                            await locator.click()
-                            await asyncio.sleep(1)
-                    except: pass
-
-                # --- EXTRACCIÓN DE PRECIOS ---
-                # Buscamos los precios reales que Binance renderiza en la tabla
-                # Esperamos un poco más para asegurar que el DOM esté listo tras los clicks
-                await asyncio.sleep(3)
-                content = await page.content()
                 
-                # Extraemos números que tengan al menos 2 decimales
-                # Usamos un regex que capture formatos 1.23, 1,234.56, etc.
-                import re
-                # Primero quitamos las comas que actúan como separador de miles
-                clean_content = content.replace(',', '')
-                raw_matches = re.findall(r'(\d+\.\d{2,})', clean_content)
+                # --- EXTRACCIÓN QUIRÚRGICA (Motor v3.2) ---
+                await asyncio.sleep(6)
                 
-                found_prices = []
-                for m in raw_matches:
-                    try:
-                        val = float(m)
-                        # Filtro de rango lógico para detectar precios P2P
-                        if 0.1 < val < 5000000:
-                            found_prices.append(val)
-                    except: continue
+                # Buscamos específicamente los elementos que suelen contener el precio
+                prices = await page.evaluate("""() => {
+                    const results = [];
+                    const divs = Array.from(document.querySelectorAll('div'));
+                    
+                    const seen = {};
+                    divs.forEach(div => {
+                        const text = div.innerText.trim().replace(/,/g, '');
+                        // Buscamos números con exactamente 2 decimales
+                        if (/^\\d+\\.\\d{2}$/.test(text)) {
+                            const val = parseFloat(text);
+                            // Descartamos porcentajes de completado (0.xx) y valores ínfimos
+                            if (val > 0.05) {
+                                seen[text] = (seen[text] || 0) + 1;
+                                results.push(val);
+                            }
+                        }
+                    });
+                    return results;
+                }""")
 
-                # Si no encontramos nada, usamos un selector CSS genérico como último recurso
-                if not found_prices:
-                    text_els = await page.locator('div').all_inner_texts()
-                    for t in text_els:
-                        t_clean = t.replace(',', '').strip()
-                        if re.match(r'^\d+\.\d+$', t_clean):
-                            try:
-                                val = float(t_clean)
-                                if 0.1 < val < 5000000: found_prices.append(val)
-                            except: continue
+                # RANGE FILTERS (Seguridad máxima)
+                ranges = {
+                    "PEN": (3.0, 4.5), "COP": (3000, 4500), "CLP": (800, 1100),
+                    "ARS": (800, 1400), "MXN": (15, 25), "VES": (30, 600),
+                    "PYG": (6000, 8000), "DOP": (50, 75), "CRC": (450, 600),
+                    "EUR": (0.8, 1.3), "CAD": (1.1, 1.7), "BRL": (4.5, 6.5)
+                }
+                
+                low, high = ranges.get(currency, (0.01, 1000000))
+                valid_prices = [p for p in prices if low <= p <= high]
+                
+                # Fallback: Regex si el evaluate falló
+                if not valid_prices:
+                    content = await page.content()
+                    # Ignoramos números que empiecen por 0. si no es EUR
+                    regex = r'(\d+\.\d{2})' if currency == "EUR" else r'([1-9]\d*\.\d{2})'
+                    raw_matches = re.findall(regex, content.replace(',', ''))
+                    valid_prices = [float(m) for m in raw_matches if low <= float(m) <= high]
 
-                prices = sorted(list(set(found_prices)))[:15]
+                prices = sorted(list(set(valid_prices)))[:15]
                 print(f"   [+] {currency}: {len(prices)} precios capturados.")
                 return prices
 
@@ -103,7 +96,6 @@ class RadarV2:
         if len(prices) == 1: return prices[0]
         
         p = sorted(prices)
-        # Eliminamos extremos si hay suficientes datos
         if len(p) > 5: p = p[1:-1]
         
         avg = sum(p) / len(p)
@@ -112,9 +104,7 @@ class RadarV2:
         return sum(purified) / len(purified) if purified else avg
 
     async def get_brl_price(self):
-        """Fallback BRL: Intentamos P2P si la API falló"""
-        # Ya incluimos BRL en BINANCE_URLS, así que main.py lo procesará vía P2P automáticamente
-        # Pero dejamos este método por compatibilidad con el código anterior de main.py
+        """Fallback por compatibilidad"""
         p = await self.get_fiat_prices("BRL", BINANCE_URLS["BRL"])
         return self.calculate_purified_average(p)
 
@@ -129,9 +119,9 @@ class RadarV2:
                 await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                 await asyncio.sleep(5)
                 text = await page.evaluate("() => document.body.innerText")
+                import re
                 match = re.search(r'(?:BCV|Central|Dólar).*?([\d,.]+)', text, re.I | re.S)
                 if match:
-                    # Normalización de venezuela (mil.punto, decimal,coma o similar)
                     val = match.group(1).replace(',', '.')
                     if val.count('.') > 1:
                         parts = val.split('.')
