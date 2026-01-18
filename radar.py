@@ -21,54 +21,64 @@ BINANCE_URLS = {
 }
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 ]
 
 class RadarV2:
     async def get_fiat_prices(self, currency, url):
-        """Motor v4: Extracción Profesional por Selectores CSS Reales"""
+        """Motor v4.1: Extracción por Fuerza Bruta (Inmune a cambios de CSS)"""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency} (Motor v4)...")
+                print(f"[*] Escaneando {currency} (Fuerza Bruta v4.1)...")
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 
-                # Esperar a que los anuncios carguen (selector real de Binance)
+                # 1. ESPERA DE RENDERIZADO
+                await asyncio.sleep(10)
+
+                # 2. LIMPIEZA AGRESIVA DE MODALES (Multidioma)
                 try:
-                    await page.wait_for_selector(".bn-web-table-row", timeout=15000)
-                except:
+                    modal_buttons = page.locator('button:has-text("Confirm"), button:has-text("Confirmar"), button:has-text("Aceptar"), button:has-text("I have read"), .bn-modal-footer button')
+                    count = await modal_buttons.count()
+                    for i in range(count):
+                        await modal_buttons.nth(i).click(timeout=1000)
+                        await asyncio.sleep(0.5)
+                except: pass
+
+                # 3. EXTRACCIÓN POR FUERZA BRUTA
+                body_text = await page.evaluate("() => document.body.innerText")
+                
+                # Rangos lógicos para filtrar basura
+                ranges = {
+                    "PEN": (3.2, 4.3), "COP": (3200, 4800), "CLP": (800, 1200),
+                    "ARS": (800, 1500), "MXN": (15, 23), "VES": (35, 550),
+                    "PYG": (6000, 8500), "DOP": (55, 75), "CRC": (450, 650),
+                    "EUR": (0.8, 1.3), "CAD": (1.2, 1.8), "BRL": (4.5, 6.5)
+                }
+                
+                low, high = ranges.get(currency, (0.01, 1000000))
+                
+                clean_text = body_text.replace(',', '')
+                raw_numbers = re.findall(r'(\d+\.\d{2,})', clean_text)
+                
+                found_prices = []
+                for n in raw_numbers:
+                    try:
+                        val = float(n)
+                        if low <= val <= high:
+                            found_prices.append(val)
+                    except: continue
+
+                if not found_prices:
                     if currency == "BRL":
-                        print(f"   [!] BRL P2P bloqueado. Usando fallback de API...")
                         return await self.get_brl_ticker_fallback()
                     return []
 
-                # --- EXTRACCIÓN QUIRÚRGICA ---
-                # Extraemos el texto de la columna Headline5 (donde está el precio real)
-                await asyncio.sleep(2)
-                price_texts = await page.locator(".bn-web-table-row .headline5.text-primaryText").all_inner_texts()
-                
-                found_prices = []
-                for pt in price_texts:
-                    try:
-                        # Limpiar: "S/. 3.553" -> "3.553"
-                        clean = "".join(c for c in pt if c.isdigit() or c in ".,")
-                        if "," in clean and "." in clean: clean = clean.replace(",", "")
-                        elif "," in clean:
-                            if len(clean.split(",")[-1]) == 2: clean = clean.replace(",", ".")
-                            else: clean = clean.replace(",", "")
-                            
-                        val = float(clean)
-                        if val > 0.1: found_prices.append(val)
-                    except: continue
-
-                if not found_prices and currency == "BRL":
-                    return await self.get_brl_ticker_fallback()
-
                 prices = sorted(list(set(found_prices)))[:15]
-                print(f"   [+] {currency}: {len(prices)} precios capturados.")
+                print(f"   [+] {currency}: {len(prices)} precios extraídos.")
                 return prices
 
             except Exception as e:
@@ -78,18 +88,17 @@ class RadarV2:
                 await browser.close()
 
     async def get_brl_ticker_fallback(self):
-        """Recurso de emergencia para BRL (AwesomeAPI)"""
+        """API Externa para BRL"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get("https://economia.awesomeapi.com.br/json/last/USDT-BRL", timeout=8) as resp:
                     data = await resp.json()
                     val = float(data["USDTBRL"]["bid"])
-                    print(f"   [+] BRL (Fallback): {val}")
+                    print(f"   [+] BRL (API Fallback): {val}")
                     return [val]
         except: return []
 
     def calculate_purified_average(self, prices):
-        """Algoritmo de Purificación +/- 1%"""
         if not prices: return 0.0
         if len(prices) == 1: return prices[0]
         p = sorted(prices)
@@ -103,7 +112,6 @@ class RadarV2:
         return self.calculate_purified_average(p)
 
     async def get_bcv_price(self):
-        """BCV estable vía tcambio.app"""
         url = "https://www.tcambio.app/"
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -113,6 +121,7 @@ class RadarV2:
                 await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                 await asyncio.sleep(5)
                 text = await page.evaluate("() => document.body.innerText")
+                import re
                 match = re.search(r'(?:BCV|Central|Dólar).*?([\d,.]+)', text, re.I | re.S)
                 if match:
                     val = match.group(1).replace(',', '.')
