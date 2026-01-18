@@ -3,9 +3,9 @@ import random
 import aiohttp
 import re
 from playwright.async_api import async_playwright
-from bs4 import BeautifulSoup
 
-# Configuración de Monedas y URLs (Inspirado en Promedios.json)
+# Configuración de Monedas y URLs
+# Hemos añadido BRL a la lista de P2P para evitar el bloqueo de API 451
 BINANCE_URLS = {
     "PEN": "https://p2p.binance.com/trade/all-payments/USDT?fiat=PEN",
     "COP": "https://p2p.binance.com/trade/all-payments/USDT?fiat=COP",
@@ -16,185 +16,109 @@ BINANCE_URLS = {
     "PYG": "https://p2p.binance.com/trade/all-payments/USDT?fiat=PYG",
     "DOP": "https://p2p.binance.com/trade/all-payments/USDT?fiat=DOP",
     "CRC": "https://p2p.binance.com/trade/all-payments/USDT?fiat=CRC",
-    "EUR": "https://p2p.binance.com/trade/SEPAinstant/USDT?fiat=EUR",
-    "CAD": "https://p2p.binance.com/trade/all-payments/USDT?fiat=CAD"
+    "EUR": "https://p2p.binance.com/trade/all-payments/USDT?fiat=EUR",
+    "CAD": "https://p2p.binance.com/trade/all-payments/USDT?fiat=CAD",
+    "BRL": "https://p2p.binance.com/trade/all-payments/USDT?fiat=BRL"
 }
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 ]
 
 class RadarV2:
-    def __init__(self):
-        self.results = {}
-
     async def get_fiat_prices(self, currency, url):
-        """Extrae los precios de Binance P2P usando Playwright (Stealth mode)"""
+        """Extrae precios de Binance P2P usando Motor v3 (Evaluate & Anti-Risk)"""
         async with async_playwright() as p:
-            # Lanzamos el navegador con configuración compatible para Docker
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox", 
-                    "--disable-setuid-sandbox", 
-                    "--disable-dev-shm-usage",
-                    "--disable-accelerated-2d-canvas",
-                    "--disable-gpu"
-                ]
-            ) 
-            context = await browser.new_context(
-                user_agent=random.choice(USER_AGENTS),
-                viewport={'width': 1920, 'height': 1080},
-                extra_http_headers={"Accept-Language": "es-ES,es;q=0.9"}
-            )
-            
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
+            context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency}...")
+                print(f"[*] Escaneando {currency} (Motor v3)...")
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                
-                # REGLA ANTI-AVISOS: Si aparece el botón de "Confirmar" o "I have read", lo pulsamos
-                try:
-                    # Buscamos botones de confirmación que suelen bloquear la vista
-                    warning_buttons = [
-                        'button:has-text("Confirm")', 
-                        'button:has-text("I have read")',
-                        'button:has-text("Confirmar")'
-                    ]
-                    for btn in warning_buttons:
-                        if await page.is_visible(btn):
-                            await page.click(btn)
-                            await asyncio.sleep(1)
-                except:
-                    pass
-                
-                # Esperar a los precios reales
-                await asyncio.sleep(5)
-                
-                content = await page.content()
-                soup = BeautifulSoup(content, 'html.parser')
-                
-                found_prices = []
-                # Buscamos elementos que contengan números con decimales (formato precio)
-                # Binance suele renderizar los precios en divs con la clase 'bn-flex' o similar
-                potential_divs = soup.find_all(['div', 'span'], string=re.compile(r'\d+\.\d+'))
-                
-                # Fallback: Extraer todo texto que parezca un precio significativo
-                if not potential_divs:
-                    divs = soup.find_all('div')
-                    for div in divs:
-                        t = div.get_text(strip=True).replace(',', '')
-                        if t and re.match(r'^\d+(\.\d+)?$', t):
-                            val = float(t)
-                            if 0.1 < val < 2000000:
-                                found_prices.append(val)
-                else:
-                    for item in potential_divs:
-                        try:
-                            val = float(item.get_text(strip=True).replace(',', ''))
-                            if 0.1 < val < 2000000:
-                                found_prices.append(val)
-                        except: continue
+                await asyncio.sleep(6) # Espera inicial para renderizado
 
-                # Si seguimos sin precios, intentamos un último escaneo agresivo
-                if not found_prices:
-                    text = soup.get_text()
-                    # Regex para números con 2 o más decimales
-                    matches = re.findall(r'(\d+\.\d{2,})', text)
-                    found_prices = [float(m) for m in matches if 0.1 < float(m) < 2000000]
+                # --- SCRIPT DE LIMPIEZA DE AVISOS (Agresivo) ---
+                await page.evaluate("""() => {
+                    const selectors = [
+                        'button:has-text("Confirm")', 'button:has-text("Confirmar")',
+                        'button:has-text("I have read")', 'label:has-text("I have read")',
+                        '.bn-checkbox', 'input[type="checkbox"]'
+                    ];
+                    selectors.forEach(sel => {
+                        const els = document.querySelectorAll(sel);
+                        els.forEach(el => el.click());
+                    });
+                }""")
+                await asyncio.sleep(2)
 
-                prices = sorted(list(set(found_prices)))[:15]
-                print(f"[+] {currency}: {len(prices)} precios encontrados.")
+                # --- EXTRACCIÓN DE PRECIOS VIA EVALUATE ---
+                # Buscamos números que parezcan precios en la tabla principal
+                prices = await page.evaluate("""() => {
+                    const results = [];
+                    // Los precios en Binance P2P suelen estar en divs con texto resaltado
+                    const elements = document.querySelectorAll('div');
+                    for (let el of elements) {
+                        const text = el.innerText.trim().replace(/,/g, '');
+                        if (/^\\d+\\.\\d+$/.test(text)) {
+                            const val = parseFloat(text);
+                            if (val > 0.01 && val < 5000000) results.push(val);
+                        }
+                    }
+                    return results;
+                }""")
+
+                if not prices:
+                    content = await page.content()
+                    prices = [float(m) for m in re.findall(r'(\d+\.\d{2,})', content.replace(',', '')) if 0.1 < float(m) < 5000000]
+
+                prices = sorted(list(set(prices)))[:15]
+                print(f"   [+] {currency}: {len(prices)} precios capturados.")
                 return prices
 
             except Exception as e:
-                print(f"[!] Error en {currency}: {str(e)}")
+                print(f"   [!] Error en {currency}: {e}")
                 return []
             finally:
                 await browser.close()
 
     def calculate_purified_average(self, prices):
-        """Implementa el algoritmo de exclusión iterativa +/- 1% (Lógica Anti-Outliers)"""
-        if not prices or len(prices) < 2:
-            return prices[0] if prices else 0.0
+        """Algoritmo de Purificación +/- 1%"""
+        if not prices: return 0.0
+        if len(prices) == 1: return prices[0]
         
-        current_prices = sorted(prices)
-        original_count = len(current_prices)
+        p = sorted(prices)
+        if len(p) > 5: p = p[1:-1]
         
-        # Eliminamos el 20% más alto y más bajo antes de empezar para ser más robustos
-        if len(current_prices) >= 5:
-            current_prices = current_prices[1:-1]
-
-        while len(current_prices) > 2:
-            avg = sum(current_prices) / len(current_prices)
-            lower_bound = avg * 0.98 # Un poco más permisivo para evitar quedarnos sin datos
-            upper_bound = avg * 1.02
-            
-            to_remove = None
-            max_dist = -1
-            
-            for p in current_prices:
-                if p < lower_bound or p > upper_bound:
-                    dist = abs(p - avg)
-                    if dist > max_dist:
-                        max_dist = dist
-                        to_remove = p
-            
-            if to_remove is None:
-                break
-            current_prices.remove(to_remove)
-            
-        return sum(current_prices) / len(current_prices) if current_prices else 0.0
+        avg = sum(p) / len(p)
+        purified = [x for x in p if avg * 0.98 <= x <= avg * 1.02]
+        
+        return sum(purified) / len(purified) if purified else avg
 
     async def get_brl_price(self):
-        """Obtiene BRL usando una ruta alternativa para evitar el error 451"""
-        # Intentamos con varias APIs para saltar bloqueos geográficos
-        urls = [
-            "https://api.binance.com/api/v3/ticker/price?symbol=USDTBRL",
-            "https://api1.binance.com/api/v3/ticker/price?symbol=USDTBRL",
-            "https://api3.binance.com/api/v3/ticker/price?symbol=USDTBRL"
-        ]
-        
-        for url in urls:
-            headers = {"User-Agent": random.choice(USER_AGENTS)}
-            async with aiohttp.ClientSession(headers=headers) as session:
-                try:
-                    async with session.get(url, timeout=5) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            val = float(data['price'])
-                            print(f"[+] BRL obtenido: {val}")
-                            return val
-                except: continue
-        print("[!] No se pudo obtener BRL de ninguna API.")
-        return 0.0
+        """Fallback por compatibilidad"""
+        p = await self.get_fiat_prices("BRL", BINANCE_URLS["BRL"])
+        return self.calculate_purified_average(p)
 
     async def get_bcv_price(self):
-        """Obtiene la tasa BCV desde tcambio.app con selector más robusto"""
+        """BCV estable vía tcambio.app"""
         url = "https://www.tcambio.app/"
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                 await asyncio.sleep(5)
-                content = await page.content()
-                soup = BeautifulSoup(content, 'html.parser')
-                
-                text = soup.get_text()
-                match = re.search(r'(?:BCV|Central).*?([\d,.]+)', text, re.IGNORECASE | re.DOTALL)
+                text = await page.evaluate("() => document.body.innerText")
+                import re
+                match = re.search(r'(?:BCV|Central|Dólar).*?([\d,.]+)', text, re.I | re.S)
                 if match:
-                    val_str = match.group(1).replace(',', '.')
-                    if val_str.count('.') > 1:
-                        parts = val_str.split('.')
-                        val_str = "".join(parts[:-1]) + "." + parts[-1]
-                    val = float(val_str)
-                    print(f"[+] BCV obtenido: {val}")
-                    return val
+                    val = match.group(1).replace(',', '.')
+                    if val.count('.') > 1:
+                        parts = val.split('.')
+                        val = "".join(parts[:-1]) + "." + parts[-1]
+                    return float(val)
                 return 0.0
             except: return 0.0
             finally: await browser.close()
