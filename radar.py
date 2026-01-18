@@ -26,59 +26,51 @@ USER_AGENTS = [
 
 class RadarV2:
     async def get_fiat_prices(self, currency, url):
-        """Motor v4.1: Extracción por Fuerza Bruta (Inmune a cambios de CSS)"""
+        """Motor v5: Extracción Estructural (Sin Rangos)"""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency} (Fuerza Bruta v4.1)...")
+                print(f"[*] Escaneando {currency} (Motor v5)...")
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 
-                # 1. ESPERA DE RENDERIZADO
-                await asyncio.sleep(10)
-
-                # 2. LIMPIEZA AGRESIVA DE MODALES (Multidioma)
+                await asyncio.sleep(8)
                 try:
-                    modal_buttons = page.locator('button:has-text("Confirm"), button:has-text("Confirmar"), button:has-text("Aceptar"), button:has-text("I have read"), .bn-modal-footer button')
-                    count = await modal_buttons.count()
-                    for i in range(count):
-                        await modal_buttons.nth(i).click(timeout=1000)
-                        await asyncio.sleep(0.5)
+                    await page.locator('button:has-text("Confirm"), button:has-text("Confirmar"), button:has-text("Aceptar")').first.click(timeout=3000)
                 except: pass
 
-                # 3. EXTRACCIÓN POR FUERZA BRUTA
-                body_text = await page.evaluate("() => document.body.innerText")
-                
-                # Rangos lógicos para filtrar basura
-                ranges = {
-                    "PEN": (3.2, 4.3), "COP": (3200, 4800), "CLP": (800, 1200),
-                    "ARS": (800, 1500), "MXN": (15, 23), "VES": (35, 550),
-                    "PYG": (6000, 8500), "DOP": (55, 75), "CRC": (450, 650),
-                    "EUR": (0.8, 1.3), "CAD": (1.2, 1.8), "BRL": (4.5, 6.5)
-                }
-                
-                low, high = ranges.get(currency, (0.01, 1000000))
-                
-                clean_text = body_text.replace(',', '')
-                raw_numbers = re.findall(r'(\d+\.\d{2,})', clean_text)
-                
-                found_prices = []
-                for n in raw_numbers:
-                    try:
-                        val = float(n)
-                        if low <= val <= high:
-                            found_prices.append(val)
-                    except: continue
+                # EXTRACCIÓN ESTRUCTURAL
+                prices = await page.evaluate("""() => {
+                    const results = [];
+                    const rows = Array.from(document.querySelectorAll('.bn-web-table-row, [role="row"]'));
+                    
+                    rows.forEach(row => {
+                        const text = row.innerText.replace(/,/g, '');
+                        // Buscamos números con decimales (Precio)
+                        const matches = text.match(/(\\d+\\.\\d{2,})/g);
+                        if (matches) {
+                            matches.forEach(m => {
+                                const val = parseFloat(m);
+                                // Filtro mínimo absoluto solo para evitar basura total (0.1)
+                                if (val > 0.1) results.push(val);
+                            });
+                        }
+                    });
+                    return results;
+                }""")
 
-                if not found_prices:
-                    if currency == "BRL":
-                        return await self.get_brl_ticker_fallback()
-                    return []
+                if not prices:
+                    content = await page.content()
+                    raw_matches = re.findall(r'(\d+[.,]\d{2,})', content.replace(',', ''))
+                    prices = [float(m) for m in raw_matches if float(m) > 0.1]
 
-                prices = sorted(list(set(found_prices)))[:15]
-                print(f"   [+] {currency}: {len(prices)} precios extraídos.")
+                if not prices and currency == "BRL":
+                    return await self.get_brl_ticker_fallback()
+
+                prices = sorted(list(set(prices)))[:15]
+                print(f"   [+] {currency}: {len(prices)} precios capturados.")
                 return prices
 
             except Exception as e:
@@ -88,13 +80,11 @@ class RadarV2:
                 await browser.close()
 
     async def get_brl_ticker_fallback(self):
-        """API Externa para BRL"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get("https://economia.awesomeapi.com.br/json/last/USDT-BRL", timeout=8) as resp:
                     data = await resp.json()
                     val = float(data["USDTBRL"]["bid"])
-                    print(f"   [+] BRL (API Fallback): {val}")
                     return [val]
         except: return []
 
