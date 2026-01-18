@@ -101,14 +101,14 @@ async def background_radar_worker():
             CACHE["status"] = "ready"
             
             duration = int(time.time() - start_time)
-            print(f"[+] [Worker] Éxito. Tasas listas en {duration}s. Siguiente ciclo en 10m.")
+            print(f"[+] [Worker] Éxito. Tasas listas en {duration}s. Siguiente ciclo en 120s.")
             
         except Exception as e:
             print(f"[CRÍTICO] Error general en Worker: {e}")
             CACHE["status"] = "error"
         
-        # Esperar 10 minutos (600s)
-        await asyncio.sleep(600)
+        # Esperar 2 minutos (120s) para datos casi en tiempo real
+        await asyncio.sleep(120)
 
 @app.get("/")
 def read_root():
