@@ -38,41 +38,56 @@ class RadarV2:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 await asyncio.sleep(6) # Espera inicial para renderizado
 
-                # --- SCRIPT DE LIMPIEZA DE AVISOS (Agresivo) ---
-                await page.evaluate("""() => {
-                    const selectors = [
-                        'button:has-text("Confirm")', 'button:has-text("Confirmar")',
-                        'button:has-text("I have read")', 'label:has-text("I have read")',
-                        '.bn-checkbox', 'input[type="checkbox"]'
-                    ];
-                    selectors.forEach(sel => {
-                        const els = document.querySelectorAll(sel);
-                        els.forEach(el => el.click());
-                    });
-                }""")
-                await asyncio.sleep(2)
+                # --- LIMPIEZA DE AVISOS (Motor v3.1 - Corregido) ---
+                # Usamos el sistema nativo de Playwright para evitar el error de sintaxis anterior
+                warning_selectors = [
+                    'button:has-text("Confirm")', 
+                    'button:has-text("Confirmar")',
+                    'button:has-text("I have read")',
+                    'label:has-text("I have read")'
+                ]
+                for selector in warning_selectors:
+                    try:
+                        locator = page.locator(selector)
+                        if await locator.is_visible(timeout=3000):
+                            await locator.click()
+                            await asyncio.sleep(1)
+                    except: pass
 
-                # --- EXTRACCIÓN DE PRECIOS VIA EVALUATE ---
-                # Buscamos números que parezcan precios en la tabla principal
-                prices = await page.evaluate("""() => {
-                    const results = [];
-                    // Los precios en Binance P2P suelen estar en divs con texto resaltado
-                    const elements = document.querySelectorAll('div');
-                    for (let el of elements) {
-                        const text = el.innerText.trim().replace(/,/g, '');
-                        if (/^\\d+\\.\\d+$/.test(text)) {
-                            const val = parseFloat(text);
-                            if (val > 0.01 && val < 5000000) results.push(val);
-                        }
-                    }
-                    return results;
-                }""")
+                # --- EXTRACCIÓN DE PRECIOS ---
+                # Buscamos los precios reales que Binance renderiza en la tabla
+                # Esperamos un poco más para asegurar que el DOM esté listo tras los clicks
+                await asyncio.sleep(3)
+                content = await page.content()
+                
+                # Extraemos números que tengan al menos 2 decimales
+                # Usamos un regex que capture formatos 1.23, 1,234.56, etc.
+                import re
+                # Primero quitamos las comas que actúan como separador de miles
+                clean_content = content.replace(',', '')
+                raw_matches = re.findall(r'(\d+\.\d{2,})', clean_content)
+                
+                found_prices = []
+                for m in raw_matches:
+                    try:
+                        val = float(m)
+                        # Filtro de rango lógico para detectar precios P2P
+                        if 0.1 < val < 5000000:
+                            found_prices.append(val)
+                    except: continue
 
-                if not prices:
-                    content = await page.content()
-                    prices = [float(m) for m in re.findall(r'(\d+\.\d{2,})', content.replace(',', '')) if 0.1 < float(m) < 5000000]
+                # Si no encontramos nada, usamos un selector CSS genérico como último recurso
+                if not found_prices:
+                    text_els = await page.locator('div').all_inner_texts()
+                    for t in text_els:
+                        t_clean = t.replace(',', '').strip()
+                        if re.match(r'^\d+\.\d+$', t_clean):
+                            try:
+                                val = float(t_clean)
+                                if 0.1 < val < 5000000: found_prices.append(val)
+                            except: continue
 
-                prices = sorted(list(set(prices)))[:15]
+                prices = sorted(list(set(found_prices)))[:15]
                 print(f"   [+] {currency}: {len(prices)} precios capturados.")
                 return prices
 
@@ -88,6 +103,7 @@ class RadarV2:
         if len(prices) == 1: return prices[0]
         
         p = sorted(prices)
+        # Eliminamos extremos si hay suficientes datos
         if len(p) > 5: p = p[1:-1]
         
         avg = sum(p) / len(p)
@@ -96,7 +112,9 @@ class RadarV2:
         return sum(purified) / len(purified) if purified else avg
 
     async def get_brl_price(self):
-        """Fallback por compatibilidad"""
+        """Fallback BRL: Intentamos P2P si la API falló"""
+        # Ya incluimos BRL en BINANCE_URLS, así que main.py lo procesará vía P2P automáticamente
+        # Pero dejamos este método por compatibilidad con el código anterior de main.py
         p = await self.get_fiat_prices("BRL", BINANCE_URLS["BRL"])
         return self.calculate_purified_average(p)
 
@@ -111,9 +129,9 @@ class RadarV2:
                 await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                 await asyncio.sleep(5)
                 text = await page.evaluate("() => document.body.innerText")
-                import re
                 match = re.search(r'(?:BCV|Central|Dólar).*?([\d,.]+)', text, re.I | re.S)
                 if match:
+                    # Normalización de venezuela (mil.punto, decimal,coma o similar)
                     val = match.group(1).replace(',', '.')
                     if val.count('.') > 1:
                         parts = val.split('.')
