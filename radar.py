@@ -5,7 +5,6 @@ import re
 from playwright.async_api import async_playwright
 
 # Configuración de Monedas y URLs
-# Hemos añadido BRL a la lista de P2P para evitar el bloqueo de API 451
 BINANCE_URLS = {
     "PEN": "https://p2p.binance.com/trade/all-payments/USDT?fiat=PEN",
     "COP": "https://p2p.binance.com/trade/all-payments/USDT?fiat=COP",
@@ -27,58 +26,61 @@ USER_AGENTS = [
 
 class RadarV2:
     async def get_fiat_prices(self, currency, url):
-        """Extrae precios de Binance P2P usando Motor v3.2 (Extracción Quirúrgica)"""
+        """Extrae precios de Binance P2P usando Motor v3.3 (Anti-Inflación & Consenso)"""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency} (Motor v3.2)...")
+                print(f"[*] Escaneando {currency} (Motor v3.3)...")
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 
-                # --- EXTRACCIÓN QUIRÚRGICA (Motor v3.2) ---
-                await asyncio.sleep(6)
+                # --- EXTRACCIÓN POR CONSENSO (v3.3) ---
+                await asyncio.sleep(7)
                 
-                # Buscamos específicamente los elementos que suelen contener el precio
                 prices = await page.evaluate("""() => {
                     const results = [];
-                    const divs = Array.from(document.querySelectorAll('div'));
-                    
+                    const elements = Array.from(document.querySelectorAll('div, span'));
                     const seen = {};
-                    divs.forEach(div => {
-                        const text = div.innerText.trim().replace(/,/g, '');
-                        // Buscamos números con exactamente 2 decimales
+                    
+                    elements.forEach(el => {
+                        const text = el.innerText.trim().replace(/,/g, '');
+                        // Buscamos números con decimales
                         if (/^\\d+\\.\\d{2}$/.test(text)) {
                             const val = parseFloat(text);
-                            // Descartamos porcentajes de completado (0.xx) y valores ínfimos
                             if (val > 0.05) {
                                 seen[text] = (seen[text] || 0) + 1;
                                 results.push(val);
                             }
                         }
                     });
-                    return results;
+                    
+                    // Solo aceptamos números que se repiten (Precios de anuncios)
+                    // Los metadatos de éxito suelen ser variados y únicos.
+                    return results.filter(v => seen[v.toFixed(2)] >= 2);
                 }""")
 
-                # RANGE FILTERS (Seguridad máxima)
+                # BANDAS EXTRA ANCHAS (Protección contra inflación extrema)
                 ranges = {
-                    "PEN": (3.0, 4.5), "COP": (3000, 4500), "CLP": (800, 1100),
-                    "ARS": (800, 1400), "MXN": (15, 25), "VES": (30, 600),
-                    "PYG": (6000, 8000), "DOP": (50, 75), "CRC": (450, 600),
-                    "EUR": (0.8, 1.3), "CAD": (1.1, 1.7), "BRL": (4.5, 6.5)
+                    "PEN": (1.0, 10.0), "COP": (1000, 10000), "CLP": (100, 3000),
+                    "ARS": (100, 8000), "MXN": (5, 100), "VES": (5, 5000),
+                    "PYG": (1000, 20000), "DOP": (20, 200), "CRC": (100, 2000),
+                    "EUR": (0.1, 5.0), "CAD": (0.1, 5.0), "BRL": (1.0, 20.0)
                 }
                 
                 low, high = ranges.get(currency, (0.01, 1000000))
                 valid_prices = [p for p in prices if low <= p <= high]
                 
-                # Fallback: Regex si el evaluate falló
+                # Fallback Regex
                 if not valid_prices:
                     content = await page.content()
-                    # Ignoramos números que empiecen por 0. si no es EUR
-                    regex = r'(\d+\.\d{2})' if currency == "EUR" else r'([1-9]\d*\.\d{2})'
+                    regex = r'(\d+\.\d{2})'
                     raw_matches = re.findall(regex, content.replace(',', ''))
-                    valid_prices = [float(m) for m in raw_matches if low <= float(m) <= high]
+                    # En fallback también aplicamos consenso manual
+                    counts = {}
+                    for m in raw_matches: counts[m] = counts.get(m, 0) + 1
+                    valid_prices = [float(m) for m, c in counts.items() if c >= 2 and low <= float(m) <= high]
 
                 prices = sorted(list(set(valid_prices)))[:15]
                 print(f"   [+] {currency}: {len(prices)} precios capturados.")
@@ -94,22 +96,17 @@ class RadarV2:
         """Algoritmo de Purificación +/- 1%"""
         if not prices: return 0.0
         if len(prices) == 1: return prices[0]
-        
         p = sorted(prices)
         if len(p) > 5: p = p[1:-1]
-        
         avg = sum(p) / len(p)
         purified = [x for x in p if avg * 0.98 <= x <= avg * 1.02]
-        
         return sum(purified) / len(purified) if purified else avg
 
     async def get_brl_price(self):
-        """Fallback por compatibilidad"""
         p = await self.get_fiat_prices("BRL", BINANCE_URLS["BRL"])
         return self.calculate_purified_average(p)
 
     async def get_bcv_price(self):
-        """BCV estable vía tcambio.app"""
         url = "https://www.tcambio.app/"
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -119,7 +116,6 @@ class RadarV2:
                 await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                 await asyncio.sleep(5)
                 text = await page.evaluate("() => document.body.innerText")
-                import re
                 match = re.search(r'(?:BCV|Central|Dólar).*?([\d,.]+)', text, re.I | re.S)
                 if match:
                     val = match.group(1).replace(',', '.')
