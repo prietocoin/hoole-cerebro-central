@@ -26,63 +26,48 @@ USER_AGENTS = [
 
 class RadarV2:
     async def get_fiat_prices(self, currency, url):
-        """Extrae precios de Binance P2P usando Motor v3.3 (Anti-Inflación & Consenso)"""
+        """Motor v4: Extracción Profesional por Selectores CSS Reales"""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             
             try:
-                print(f"[*] Escaneando {currency} (Motor v3.3)...")
+                print(f"[*] Escaneando {currency} (Motor v4)...")
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 
-                # --- EXTRACCIÓN POR CONSENSO (v3.3) ---
-                await asyncio.sleep(7)
-                
-                prices = await page.evaluate("""() => {
-                    const results = [];
-                    const elements = Array.from(document.querySelectorAll('div, span'));
-                    const seen = {};
-                    
-                    elements.forEach(el => {
-                        const text = el.innerText.trim().replace(/,/g, '');
-                        // Buscamos números con decimales
-                        if (/^\\d+\\.\\d{2}$/.test(text)) {
-                            const val = parseFloat(text);
-                            if (val > 0.05) {
-                                seen[text] = (seen[text] || 0) + 1;
-                                results.push(val);
-                            }
-                        }
-                    });
-                    
-                    // Solo aceptamos números que se repiten (Precios de anuncios)
-                    // Los metadatos de éxito suelen ser variados y únicos.
-                    return results.filter(v => seen[v.toFixed(2)] >= 2);
-                }""")
+                # Esperar a que los anuncios carguen (selector real de Binance)
+                try:
+                    await page.wait_for_selector(".bn-web-table-row", timeout=15000)
+                except:
+                    if currency == "BRL":
+                        print(f"   [!] BRL P2P bloqueado. Usando fallback de API...")
+                        return await self.get_brl_ticker_fallback()
+                    return []
 
-                # BANDAS EXTRA ANCHAS (Protección contra inflación extrema)
-                ranges = {
-                    "PEN": (1.0, 10.0), "COP": (1000, 10000), "CLP": (100, 3000),
-                    "ARS": (100, 8000), "MXN": (5, 100), "VES": (5, 5000),
-                    "PYG": (1000, 20000), "DOP": (20, 200), "CRC": (100, 2000),
-                    "EUR": (0.1, 5.0), "CAD": (0.1, 5.0), "BRL": (1.0, 20.0)
-                }
+                # --- EXTRACCIÓN QUIRÚRGICA ---
+                # Extraemos el texto de la columna Headline5 (donde está el precio real)
+                await asyncio.sleep(2)
+                price_texts = await page.locator(".bn-web-table-row .headline5.text-primaryText").all_inner_texts()
                 
-                low, high = ranges.get(currency, (0.01, 1000000))
-                valid_prices = [p for p in prices if low <= p <= high]
-                
-                # Fallback Regex
-                if not valid_prices:
-                    content = await page.content()
-                    regex = r'(\d+\.\d{2})'
-                    raw_matches = re.findall(regex, content.replace(',', ''))
-                    # En fallback también aplicamos consenso manual
-                    counts = {}
-                    for m in raw_matches: counts[m] = counts.get(m, 0) + 1
-                    valid_prices = [float(m) for m, c in counts.items() if c >= 2 and low <= float(m) <= high]
+                found_prices = []
+                for pt in price_texts:
+                    try:
+                        # Limpiar: "S/. 3.553" -> "3.553"
+                        clean = "".join(c for c in pt if c.isdigit() or c in ".,")
+                        if "," in clean and "." in clean: clean = clean.replace(",", "")
+                        elif "," in clean:
+                            if len(clean.split(",")[-1]) == 2: clean = clean.replace(",", ".")
+                            else: clean = clean.replace(",", "")
+                            
+                        val = float(clean)
+                        if val > 0.1: found_prices.append(val)
+                    except: continue
 
-                prices = sorted(list(set(valid_prices)))[:15]
+                if not found_prices and currency == "BRL":
+                    return await self.get_brl_ticker_fallback()
+
+                prices = sorted(list(set(found_prices)))[:15]
                 print(f"   [+] {currency}: {len(prices)} precios capturados.")
                 return prices
 
@@ -91,6 +76,17 @@ class RadarV2:
                 return []
             finally:
                 await browser.close()
+
+    async def get_brl_ticker_fallback(self):
+        """Recurso de emergencia para BRL (AwesomeAPI)"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://economia.awesomeapi.com.br/json/last/USDT-BRL", timeout=8) as resp:
+                    data = await resp.json()
+                    val = float(data["USDTBRL"]["bid"])
+                    print(f"   [+] BRL (Fallback): {val}")
+                    return [val]
+        except: return []
 
     def calculate_purified_average(self, prices):
         """Algoritmo de Purificación +/- 1%"""
@@ -107,6 +103,7 @@ class RadarV2:
         return self.calculate_purified_average(p)
 
     async def get_bcv_price(self):
+        """BCV estable vía tcambio.app"""
         url = "https://www.tcambio.app/"
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
